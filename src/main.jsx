@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import './style.css';
 
-const base = import.meta.env.VITE_API_URL ?? '';
+const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
 const money = value => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(value);
 const time = value => value ? new Intl.DateTimeFormat('vi-VN', {
   dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh'
