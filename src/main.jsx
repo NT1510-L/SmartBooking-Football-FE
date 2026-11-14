@@ -70,12 +70,12 @@ function App() {
       throw error;
     }
   };
+  const role = session?.role;
   const links = [
     ['browse', 'Tìm sân', MapPin],
-    ...(session ? [['bookings', 'Lịch đặt', CalendarDays]] : []),
-    ...(session?.role === 'User' ? [['notifications', 'Thông báo', Bell]] : []),
-    ...(session && session.role !== 'User' ? [['manage', 'Quản lý', Settings2]] : []),
-    ...(session?.role === 'Admin' ? [['receipts', 'Đối soát', Wallet]] : [])
+    ...(role === 'User' ? [['bookings', 'Lịch đặt của tôi', CalendarDays], ['notifications', 'Thông báo', Bell]] : []),
+    ...(role === 'Manager' ? [['staffBookings', 'Lịch sân', CalendarDays], ['manage', 'Quản lý chi nhánh', Settings2]] : []),
+    ...(role === 'Admin' ? [['staffBookings', 'Lịch toàn hệ thống', CalendarDays], ['manage', 'Quản trị', Settings2], ['receipts', 'Đối soát', Wallet]] : [])
   ];
   return <>
     <header><div className="bar"><button className="brand" onClick={() => navigate('browse')}>
@@ -95,10 +95,11 @@ function App() {
       {screen === 'login' && <Login onLogin={authenticate} fail={setError} />}
       <div hidden={screen !== 'browse'}><Browse key={browseVersion} call={call} session={session}
         login={() => navigate('login')} fail={setError} visible={screen === 'browse'} /></div>
-      {screen === 'bookings' && session && <Bookings call={call} fail={setError} admin={session.role === 'Admin'} />}
-      {screen === 'notifications' && session && <Notifications call={call} fail={setError} />}
-      {screen === 'manage' && session && <Management session={session} call={call} fail={setError} />}
-      {screen === 'receipts' && session?.role === 'Admin' && <PaymentReceipts call={call} fail={setError} />}
+      {screen === 'bookings' && role === 'User' && <Bookings call={call} fail={setError} admin={false} />}
+      {screen === 'staffBookings' && (role === 'Manager' || role === 'Admin') && <Bookings call={call} fail={setError} admin={role === 'Admin'} staff />}
+      {screen === 'notifications' && role === 'User' && <Notifications call={call} fail={setError} />}
+      {screen === 'manage' && (role === 'Manager' || role === 'Admin') && <Management session={session} call={call} fail={setError} />}
+      {screen === 'receipts' && role === 'Admin' && <PaymentReceipts call={call} fail={setError} />}
     </main>
   </>;
 }
@@ -201,7 +202,7 @@ function Browse({ call, session, login, fail, visible }) {
   </>;
 }
 
-function BookingDetail({ id, call, fail, changed }) {
+function BookingDetail({ id, call, fail, changed, canCancel = true, endpoint = '/bookings/' }) {
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -211,7 +212,7 @@ function BookingDetail({ id, call, fail, changed }) {
     let timer;
     async function refresh() {
       try {
-        const next = await call('/bookings/' + id);
+        const next = await call(endpoint + id);
         if (!current) return;
         setDetail(next);
         if (next.booking.status === 'PendingPayment') timer = setTimeout(refresh, 3000);
@@ -224,7 +225,7 @@ function BookingDetail({ id, call, fail, changed }) {
     }
     refresh();
     return () => { current = false; clearTimeout(timer); };
-  }, [id, revision]);
+  }, [id, revision, endpoint]);
   if (!detail) return <section className="panel"><p>Đang tải lịch đặt…</p></section>;
   const { booking, payment } = detail;
   async function cancel() {
@@ -248,7 +249,7 @@ function BookingDetail({ id, call, fail, changed }) {
       <p>Giữ sân đến {time(booking.expiresAtUtc)}.</p>
       {payment?.isDemo && <p className="demo-note">Giao dịch mô phỏng. Dùng script demo để xác nhận, không chuyển tiền thật.</p>}
       {!payment?.qrUrl && !payment?.isDemo && <p>Chưa có mã VietQR cho lịch này.</p>}
-      <button disabled={busy} onClick={cancel}>Hủy giữ sân</button>
+      {canCancel && <button disabled={busy} onClick={cancel}>Hủy giữ sân</button>}
     </>}
     </div>{booking.status === 'PendingPayment' && payment?.qrUrl &&
       <img src={payment.qrUrl} alt="VietQR thanh toán cho lượt đặt này" />}</section>;
@@ -260,7 +261,7 @@ function Pager({ page, setPage, more }) {
     <span>Trang {page}</span><button disabled={!more} onClick={() => setPage(page + 1)}>Sau <ChevronRight size={15} /></button></div>;
 }
 
-function Bookings({ call, fail, admin }) {
+function Bookings({ call, fail, admin, staff = false }) {
   const [branchId, setBranchId] = useState('');
   const [status, setStatus] = useState('');
   const [date, setDate] = useState('');
@@ -268,12 +269,13 @@ function Bookings({ call, fail, admin }) {
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState(null);
-  const branches = useData(() => admin ? call('/admin/branches') : Promise.resolve([]), [admin], fail);
-  const rows = useData(() => call('/bookings?' + new URLSearchParams({
+  const branches = useData(() => staff ? call('/management/branches') : admin ? call('/admin/branches') : Promise.resolve([]), [admin, staff], fail);
+  const endpoint = staff ? '/management/bookings' : '/bookings';
+  const rows = useData(() => call(endpoint + '?' + new URLSearchParams({
     status, sort, page, size: 15, ...(date && { date }), ...(branchId && { branchId })
   })), [status, date, sort, branchId, page, revision], fail);
-  return <><section className="panel"><h1>Lịch đặt</h1><div className="filters">
-    {admin && <select aria-label="Chi nhánh" value={branchId} onChange={e => { setBranchId(e.target.value); setPage(1); }}>
+  return <><section className="panel"><h1>{staff ? 'Lịch vận hành' : 'Lịch đặt của tôi'}</h1><div className="filters">
+    {staff && <select aria-label="Chi nhánh" value={branchId} onChange={e => { setBranchId(e.target.value); setPage(1); }}>
       <option value="">Tất cả chi nhánh</option>{branches?.map(branch => <option value={branch.id} key={branch.id}>{branch.name}</option>)}
     </select>}
     <select aria-label="Trạng thái" value={status} onChange={e => { setStatus(e.target.value); setPage(1); }}>
@@ -286,7 +288,7 @@ function Bookings({ call, fail, admin }) {
       <strong>#{row.booking.id} · {row.name}</strong><span>{time(row.booking.startAtUtc)}</span><Status value={row.booking.status} />
     </button>)}</div>{rows?.length === 0 && <p>Chưa có lịch đặt.</p>}
     <Pager page={page} setPage={setPage} more={rows?.length === 15} /></section>
-    {selected && <BookingDetail key={selected} id={selected} call={call} fail={fail} changed={() => setRevision(value => value + 1)} />}
+    {selected && <BookingDetail key={selected} id={selected} call={call} fail={fail} endpoint={staff ? '/management/bookings/' : '/bookings/'} canCancel={!staff} changed={() => setRevision(value => value + 1)} />}
   </>;
 }
 
