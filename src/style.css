@@ -296,6 +296,43 @@ small { font-weight: 450; }
 .error > svg { flex: none; }
 .error > span { flex: 1; }
 .error > button { background: transparent; border-color: transparent; min-height: 34px; }
+
+.manager-schedule-heading, .manager-schedule-filters, .manager-day-controls, .court-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.manager-schedule-heading, .manager-schedule-filters, .court-heading { justify-content: space-between; }
+.manager-schedule-heading h1 { margin: 0; }
+.manager-schedule-heading p { display: flex; align-items: center; gap: 7px; margin: 6px 0 0; color: var(--muted); }
+.manager-schedule-heading p > svg, .court-heading h2 > svg { color: var(--green); flex: none; }
+.manager-schedule-filters {
+  margin: 18px 0;
+  padding: 12px;
+  background: #f5f8f3;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.manager-day-controls { gap: 6px; }
+.manager-day-controls input { width: auto; }
+.manager-day-controls button[aria-pressed="true"] { color: var(--green); background: #e8f4e8; }
+.manager-schedule-filters > select { width: auto; min-width: 160px; }
+.manager-schedule-layout.with-detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(270px, .52fr); align-items: start; gap: 16px; }
+.manager-courts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); align-items: start; gap: 14px; }
+.court-schedule { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 13px; }
+.court-heading { padding: 12px 14px; border-bottom: 1px solid var(--border); background: #eff6ee; }
+.court-heading h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 16px; }
+.court-slots { display: grid; gap: 5px; padding: 7px; }
+.court-slots > button { justify-content: flex-start; flex-wrap: wrap; text-align: left; border-color: transparent; padding: 9px; }
+.court-slots > button[aria-pressed="true"] { border-color: #81ae91; background: #f0f7ee; }
+.court-slots > button > strong { font-size: 14px; font-variant-numeric: tabular-nums; }
+.court-slots > button > small { flex: 1; min-width: 28px; }
+.court-slots > button > svg { flex: none; color: var(--muted); }
+.manager-booking-detail { position: sticky; top: 18px; min-width: 0; }
+.manager-booking-detail > .link { min-height: 34px; }
+.manager-booking-detail > .panel { margin: 2px 0 0; padding: 16px; }
+
 .management-grid { margin-top: 20px; grid-template-columns: 1fr 1.22fr; }
 .management-grid > * { min-width: 0; border: 1px solid var(--border); border-radius: 13px; padding: 16px; }
 .management-grid form:last-child { margin-bottom: 0; }
@@ -307,7 +344,8 @@ small { font-weight: 450; }
   nav { order: 3; justify-content: flex-start; width: 100%; }
   .branches { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .workspace, .management-grid { grid-template-columns: 1fr; gap: 12px; }
-  .booking-summary { position: static; }
+  .manager-schedule-layout.with-detail { grid-template-columns: 1fr; }
+  .booking-summary, .manager-booking-detail { position: static; }
 }
 @media (max-width: 520px) {
   main, .bar { padding-inline: 13px; }

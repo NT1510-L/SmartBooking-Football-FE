@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ArrowRight, Bell, CalendarDays, Check, ChevronLeft, ChevronRight, CircleAlert,
-  CircleCheck, Clock3, Goal, LogIn, LogOut, MapPin, Plus, Search, Settings2, Wallet, X
+  CircleCheck, Clock3, Goal, LogIn, LogOut, MapPin, Plus, RefreshCw, Search, Settings2, Wallet, X
 } from 'lucide-react';
 import './style.css';
 
@@ -15,6 +15,7 @@ const time = value => value ? new Intl.DateTimeFormat('vi-VN', {
 const today = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date());
 const hourText = hour => `${String(hour).padStart(2, '0')}:00`;
 const dayText = date => date ? date.split('-').reverse().join('/') : 'Chưa chọn';
+const scheduleClock = new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Ho_Chi_Minh' });
 const labels = { PendingPayment: 'Chờ thanh toán', Confirmed: 'Đã xác nhận', Completed: 'Hoàn tất', Cancelled: 'Đã hủy', Expired: 'Hết hạn' };
 
 function focusSection(element) {
@@ -27,11 +28,12 @@ function bookingFromUrl() {
   return /^[1-9]\d{0,18}$/.test(id ?? '') ? id : null;
 }
 
-async function request(path, token, method = 'GET', body) {
+async function request(path, token, method = 'GET', body, signal) {
   const response = await fetch(base + '/api' + path, {
     method,
     headers: { ...(token && { Authorization: 'Bearer ' + token }), ...(body && { 'Content-Type': 'application/json' }) },
-    body: body && JSON.stringify(body)
+    body: body && JSON.stringify(body),
+    signal
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
@@ -47,24 +49,34 @@ async function request(path, token, method = 'GET', body) {
   return response.status === 204 ? null : response.json();
 }
 
-function useResult(load, dependencies, onError) {
+function useResult(load, dependencies, { onError, refreshMs = 0 } = {}) {
   const [result, setResult] = useState(null);
   useEffect(() => {
-    let current = true;
-    load().then(data => { if (current) setResult({ dependencies, value: { data } }); })
-      .catch(error => {
-        if (!current) return;
-        setResult({ dependencies, value: { error: error.message } });
+    const controller = new AbortController();
+    const { signal } = controller;
+    let timer;
+    let data;
+    async function refresh() {
+      try {
+        data = await load(signal);
+        if (!signal.aborted) setResult({ dependencies, value: { data } });
+      } catch (error) {
+        if (signal.aborted) return;
+        setResult({ dependencies, value: { data, error: error.message } });
         onError?.(error.message);
-      });
-    return () => { current = false; };
-  }, dependencies);
+      } finally {
+        if (!signal.aborted && refreshMs > 0) timer = setTimeout(refresh, refreshMs);
+      }
+    }
+    refresh();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [...dependencies, refreshMs]);
   return result && dependencies.every((value, index) => Object.is(value, result.dependencies[index]))
     ? result.value : null;
 }
 
 function useData(load, dependencies, onError) {
-  const result = useResult(load, dependencies, onError);
+  const result = useResult(load, dependencies, { onError });
   if (!result) return null;
   return result.error ? [] : result.data;
 }
@@ -136,8 +148,8 @@ function App() {
     if (paymentId) setError('');
     else navigate(next.role === 'User' ? 'browse' : 'manage');
   }
-  const call = async (path, method, body) => {
-    try { return await request(path, session?.token, method, body); }
+  const call = async (path, method, body, signal) => {
+    try { return await request(path, session?.token, method, body, signal); }
     catch (error) {
       if (session && error.status === 401) {
         clearSession();
@@ -178,7 +190,8 @@ function App() {
         <BookingDetail key={paymentId} id={paymentId} initialDetail={String(initialPayment?.booking.id) === paymentId ? initialPayment : null}
           call={call} fail={setError} changed={() => setPaymentRevision(value => value + 1)} />
       </div>}
-      {activeScreen === 'staffBookings' && (role === 'Manager' || role === 'Admin') && <Bookings call={call} fail={setError} staff />}
+      {activeScreen === 'staffBookings' && role === 'Manager' && <ManagerSchedule call={call} fail={setError} />}
+      {activeScreen === 'staffBookings' && role === 'Admin' && <Bookings call={call} fail={setError} staff />}
       {activeScreen === 'notifications' && role === 'User' && <Notifications call={call} fail={setError} />}
       {activeScreen === 'manage' && (role === 'Manager' || role === 'Admin') && <Management session={session} call={call} fail={setError} />}
       {activeScreen === 'receipts' && role === 'Admin' && <PaymentReceipts call={call} fail={setError} />}
@@ -494,6 +507,102 @@ function Pager({ page, setPage, more }) {
     <span>Trang {page}</span><button disabled={!more} onClick={() => setPage(page + 1)}>Sau <ChevronRight size={15} /></button></div>;
 }
 
+function ManagerSchedule({ call, fail }) {
+  const [date, setDate] = useState(today);
+  const [status, setStatus] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const branches = useResult(signal => call('/management/branches', 'GET', undefined, signal), [revision]);
+  const branch = branches?.data?.[0];
+  const bookings = useResult(async signal => {
+    if (!branch) return [];
+    const rows = new Map();
+    const size = 100;
+    for (let page = 1; page <= 10000; page++) {
+      const query = new URLSearchParams({ branchId: branch.id, date, status, sort: 'asc', page, size });
+      const batch = await call('/management/bookings?' + query, 'GET', undefined, signal);
+      for (const row of batch) rows.set(row.booking.id, row);
+      if (batch.length < size) break;
+    }
+    return [...rows.values()];
+  }, [branch?.id, date, status, revision]);
+
+  const courts = new Map();
+  for (const row of bookings?.data ?? []) {
+    const id = row.booking.pitchId;
+    if (!courts.has(id)) courts.set(id, { id, name: row.name, rows: [] });
+    courts.get(id).rows.push(row);
+  }
+  const schedule = [...courts.values()].sort((first, second) => first.name.localeCompare(second.name, 'vi', { numeric: true }));
+  const minDate = '1000-01-01';
+  const maxDate = '9998-12-31';
+
+  function chooseDay(next) {
+    if (!next || next === date) return;
+    setDate(next);
+    setSelected(null);
+  }
+  function stepDay(days) {
+    const day = new Date(`${date}T00:00:00Z`);
+    day.setUTCDate(day.getUTCDate() + days);
+    chooseDay(day.toISOString().slice(0, 10));
+  }
+  function refresh() { setRevision(value => value + 1); }
+
+  return <section className="panel manager-schedule" aria-labelledby="manager-schedule-heading">
+    <div className="manager-schedule-heading">
+      <div><h1 id="manager-schedule-heading">Lịch sân</h1>
+        {branch && <p><MapPin size={16} aria-hidden="true" /> {branch.name}</p>}</div>
+      <button type="button" onClick={() => { setSelected(null); refresh(); }}>
+        <RefreshCw size={16} aria-hidden="true" /> Làm mới
+      </button>
+    </div>
+
+    <div className="manager-schedule-filters">
+      <div className="manager-day-controls">
+        <button type="button" aria-label="Ngày trước" disabled={date === minDate} onClick={() => stepDay(-1)}><ChevronLeft size={18} aria-hidden="true" /></button>
+        <input type="date" aria-label="Ngày đá" value={date} min={minDate} max={maxDate} required
+          onChange={event => { if (event.target.validity.valid) chooseDay(event.target.value); }} />
+        <button type="button" aria-label="Ngày sau" disabled={date === maxDate} onClick={() => stepDay(1)}><ChevronRight size={18} aria-hidden="true" /></button>
+        <button type="button" aria-pressed={date === today()} onClick={() => chooseDay(today())}>Hôm nay</button>
+      </div>
+      <select aria-label="Trạng thái" value={status} onChange={event => { setStatus(event.target.value); setSelected(null); }}>
+        <option value="">Tất cả trạng thái</option>
+        {Object.entries(labels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+      </select>
+    </div>
+
+    {(!branches || (branch && !bookings)) && <p role="status" className="muted">Đang tải lịch sân…</p>}
+    {branches?.error && <LoadError message={branches.error} retry={refresh} />}
+    {branches?.data?.length === 0 && <p className="empty">Bạn chưa được phân công chi nhánh.</p>}
+    {branch && bookings?.error && <LoadError message={bookings.error} retry={refresh} />}
+    {branch && bookings?.data?.length === 0 && <p className="empty">{status ? 'Không có lịch phù hợp với trạng thái đã chọn.' : 'Ngày này chưa có lịch đặt.'}</p>}
+
+    <div className={selected ? 'manager-schedule-layout with-detail' : 'manager-schedule-layout'}>
+      <div className="manager-courts">
+        {schedule.map(court => (
+          <section className="court-schedule" key={court.id} aria-labelledby={`court-${court.id}`}>
+            <div className="court-heading"><h2 id={`court-${court.id}`}><Goal size={19} aria-hidden="true" /> {court.name}</h2>
+              <small>{court.rows.length} lịch</small></div>
+            <div className="court-slots">
+              {court.rows.map(({ booking }) => (
+                <button type="button" key={booking.id} aria-pressed={selected === booking.id} onClick={() => setSelected(booking.id)}>
+                  <strong>{scheduleClock.format(utcDate(booking.startAtUtc))}{booking.endAtUtc && `–${scheduleClock.format(utcDate(booking.endAtUtc))}`}</strong>
+                  <small>#{booking.id}</small><Status value={booking.status} /><ChevronRight size={16} aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+      {selected && <aside className="manager-booking-detail" aria-label="Chi tiết lịch đặt">
+        <button className="link" type="button" onClick={() => setSelected(null)}><X size={17} aria-hidden="true" /> Đóng chi tiết</button>
+        <BookingDetail key={selected} id={selected} call={call} fail={fail} staff changed={refresh} />
+      </aside>}
+    </div>
+  </section>;
+}
+
 function Bookings({ call, fail, staff = false, openPayment, paymentRevision }) {
   const [branchId, setBranchId] = useState('');
   const [status, setStatus] = useState('');
@@ -531,15 +640,21 @@ function Bookings({ call, fail, staff = false, openPayment, paymentRevision }) {
 function Notifications({ call, fail }) {
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
-  const rows = useData(() => call('/notifications?' + new URLSearchParams({ page, size: 15 })), [page, revision], fail);
+  const result = useResult(signal => call('/notifications?' + new URLSearchParams({ page, size: 15 }), 'GET', undefined, signal),
+    [page, revision], { refreshMs: page === 1 ? 3000 : 0 });
+  const rows = result?.data;
+  function reload() { setRevision(value => value + 1); }
   async function read(id) {
-    try { await call('/notifications/' + id + '/read', 'POST'); setRevision(revision + 1); }
+    try { await call('/notifications/' + id + '/read', 'POST'); reload(); }
     catch (error) { fail(error.message); }
   }
-  return <section className="panel"><h1 className="section-title"><Bell size={25} aria-hidden="true" /> Thông báo</h1><div className="rows">
+  return <section className="panel"><h1 className="section-title"><Bell size={25} aria-hidden="true" /> Thông báo</h1>
+    {!result && <p role="status" className="muted">Đang tải thông báo…</p>}
+    {result?.error && <LoadError message={result.error} retry={reload} />}
+    <div className="rows">
     {rows?.map(row => <div key={row.id} className={!row.readAtUtc ? 'unread' : ''}><span>{row.message}</span><small>{time(row.createdAtUtc)}</small>
       {!row.readAtUtc && <button onClick={() => read(row.id)}>Đánh dấu đã đọc</button>}</div>)}
-  </div>{rows?.length === 0 && <p>Chưa có thông báo.</p>}
+  </div>{rows?.length === 0 && !result.error && <p>Chưa có thông báo.</p>}
   <Pager page={page} setPage={setPage} more={rows?.length === 15} /></section>;
 }
 
