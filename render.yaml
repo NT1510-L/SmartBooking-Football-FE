@@ -6,7 +6,7 @@ services:
     staticPublishPath: ./dist
     envVars:
       # Paste the Render API URL, for example https://football-api.onrender.com
-      - key: VITE_API_URL
+      - key: VITE_API_BASE_URL
         sync: false
     routes:
       - type: rewrite

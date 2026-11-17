@@ -4,7 +4,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://smartbooking-football-be.onrender.com/api/:path*"
+      "destination": "https://smartbooking-liem-test-api.onrender.com/api/:path*"
     }
   ]
 }
