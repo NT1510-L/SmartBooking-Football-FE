@@ -18,7 +18,7 @@ const today = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Ho_Chi_Mi
 const hourText = hour => `${String(hour).padStart(2, '0')}:00`;
 const dayText = date => date ? date.split('-').reverse().join('/') : 'Chưa chọn';
 const scheduleClock = new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Ho_Chi_Minh' });
-const labels = { PendingPayment: 'Chờ thanh toán', Confirmed: 'Đã xác nhận', Completed: 'Hoàn tất', Cancelled: 'Đã hủy', Expired: 'Hết hạn' };
+const labels = { PendingPayment: 'Chờ thanh toán', Confirmed: 'Đã xác nhận', CheckedIn: 'Đã check-in', Completed: 'Hoàn tất', Cancelled: 'Đã hủy', Expired: 'Hết hạn', NoShow: 'Không đến sân' };
 
 function focusSection(element) {
   element?.focus({ preventScroll: true });
@@ -386,12 +386,13 @@ function Browse({ call, session, login, fail, visible, openPayment, paymentRevis
           <div><dt>Khung giờ</dt><dd>{hour === null ? 'Chưa chọn' : `${hourText(hour)}–${hourText(hour + 1)}`}</dd></div>
         </dl>
         <div className="summary-total"><span>Tổng tiền</span><strong>{amount > 0 ? money(amount) : '—'}</strong></div>
+        {amount > 0 && <p className="muted">Cọc 50% để xác nhận sân: <strong>{money(Math.ceil(amount / 2))}</strong>. Phần còn lại thu tại sân.</p>}
         {priceChange && <p className="price-change" role="status">Giá sân đổi từ <strong>{money(priceChange.previousAmountVnd)}</strong> thành <strong>{money(priceChange.amountVnd)}</strong>. Vui lòng xác nhận giá mới.</p>}
         {!createdBooking && hour !== null && !quote && <p className="muted" role="status">Đang lấy báo giá…</p>}
         {!createdBooking && quote?.error && <LoadError message={quote.error} retry={() => setQuoteRevision(value => value + 1)} />}
         {!createdBooking && session?.role && session.role !== 'User' ? <p className="muted">Dùng tài khoản User để đặt sân.</p> :
           !createdBooking && <button type="button" className="primary summary-action" disabled={!canBook || busy} onClick={book}>
-            {busy ? 'Đang giữ sân…' : priceChange ? 'Xác nhận giá mới và giữ sân' : session ? 'Giữ sân và thanh toán' : 'Đăng nhập để đặt'} <ArrowRight size={18} aria-hidden="true" />
+            {busy ? 'Đang giữ sân…' : priceChange ? 'Xác nhận giá mới và giữ sân' : session ? 'Giữ sân và đặt cọc' : 'Đăng nhập để đặt'} <ArrowRight size={18} aria-hidden="true" />
           </button>}
         {createdBooking && <button type="button" className="summary-action" onClick={() => openPayment(createdBooking.booking.id)}>
           Xem lịch #{createdBooking.booking.id} <ArrowRight size={18} aria-hidden="true" />
@@ -410,7 +411,7 @@ function BookingDetail({ id, initialDetail = null, call, fail, changed, staff = 
   const [revision, setRevision] = useState(0);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(Date.now);
-  const previousStatus = useRef(initialDetail?.booking.status);
+  const previousVersion = useRef(initialDetail ? JSON.stringify([initialDetail.booking.status, initialDetail.payment?.balancePaidAtUtc]) : null);
   const expiresAt = detail?.booking.status === 'PendingPayment' ? detail.booking.expiresAtUtc : null;
   const remaining = expiresAt ? Math.max(0, Math.ceil((utcDate(expiresAt).getTime() - now) / 1000)) : 0;
 
@@ -437,10 +438,10 @@ function BookingDetail({ id, initialDetail = null, call, fail, changed, staff = 
         setNow(Date.now());
         setDetail(next);
         setLoadError('');
-        const status = next.booking.status;
-        if (status === 'PendingPayment') timer = setTimeout(refresh, 3000);
-        else if (previousStatus.current === 'PendingPayment') changed();
-        previousStatus.current = status;
+        const version = JSON.stringify([next.booking.status, next.payment?.balancePaidAtUtc]);
+        if (previousVersion.current && previousVersion.current !== version) changed();
+        previousVersion.current = version;
+        if (['PendingPayment', 'Confirmed', 'CheckedIn'].includes(next.booking.status)) timer = setTimeout(refresh, 3000);
       } catch (error) {
         if (!current) return;
         setLoadError(error.message);
@@ -460,7 +461,22 @@ function BookingDetail({ id, initialDetail = null, call, fail, changed, staff = 
   const { booking, payment } = detail;
   const pending = booking.status === 'PendingPayment';
   const canPay = !staff && pending && remaining > 0;
+  const balance = payment?.balanceAmountVnd ?? 0;
+  const checkInDeadline = utcDate(booking.startAtUtc).getTime() + 10 * 60 * 1000;
+  const canCheckIn = staff && booking.status === 'Confirmed' && now < checkInDeadline;
+  const canCollectBalance = staff && ['CheckedIn', 'Completed'].includes(booking.status) && payment?.balanceStatus === 'Pending';
   const countdown = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+  async function staffAction(action) {
+    setBusy(true);
+    fail('');
+    try {
+      await call(endpoint + id + '/' + action, 'POST');
+      reload();
+    } catch (error) {
+      if (error.status === 409) reload();
+      fail(error.message);
+    } finally { setBusy(false); }
+  }
   async function cancel() {
     setBusy(true);
     fail('');
@@ -483,8 +499,18 @@ function BookingDetail({ id, initialDetail = null, call, fail, changed, staff = 
         <Status value={booking.status} /></div>
       <p className="payment-time"><CalendarDays size={16} aria-hidden="true" /> {time(booking.startAtUtc)}</p>
       {loadError && <LoadError message={loadError} retry={reload} />}
-      <p className="payment-value"><span>{canPay ? 'Số tiền cần chuyển' : 'Tổng tiền'}</span>
-        <strong>{money(payment?.amountVnd ?? booking.priceVnd)}</strong></p>
+      <p className="payment-value"><span>{canPay ? balance > 0 ? 'Tiền cọc 50% cần chuyển' : 'Số tiền cần chuyển' : 'Tổng giá sân'}</span>
+        <strong>{money(canPay ? payment?.amountVnd ?? booking.priceVnd : booking.priceVnd)}</strong></p>
+      {payment && <dl className="summary-details payment-breakdown">
+        <div><dt>Tổng giá sân</dt><dd>{money(booking.priceVnd)}</dd></div>
+        <div><dt>{balance > 0 ? 'Tiền cọc' : 'Khoản thanh toán'}</dt><dd>{money(payment.amountVnd)} · {payment.status === 'Paid' ? 'Đã nhận' : labels[booking.status]}</dd></div>
+        {balance > 0 && <div><dt>Phần còn lại tại sân</dt><dd>{money(balance)} · {payment.balanceStatus === 'Paid' ? 'Đã thu' : payment.balanceStatus === 'Cancelled' ? 'Không thu' : 'Chưa thu'}</dd></div>}
+      </dl>}
+      {booking.checkedInAtUtc && <p className="muted">Check-in lúc {time(booking.checkedInAtUtc)}.</p>}
+      {booking.status === 'Confirmed' && <p className="muted">Khách cần check-in trước {time(new Date(checkInDeadline).toISOString())}. Quá hạn 10 phút sau giờ bắt đầu sẽ chuyển sang không đến sân.</p>}
+      {booking.status === 'NoShow' && <p className="demo-note">Lịch đã quá hạn check-in. Tiền cọc đã nhận được giữ lại và phần còn lại không thu.</p>}
+      {canCheckIn && <button type="button" className="primary" disabled={busy} onClick={() => staffAction('check-in')}>Check-in khách đến sân</button>}
+      {canCollectBalance && <button type="button" className="primary" disabled={busy} onClick={() => staffAction('collect-balance')}>Xác nhận đã thu {money(balance)} tại sân</button>}
       {payment && <div className="payment-code"><div><span>{canPay ? 'Nội dung chuyển khoản' : 'Mã thanh toán'}</span><code>{payment.code}</code></div>
         {canPay && <button type="button" onClick={copyCode}>{copied ? <><Check size={15} aria-hidden="true" /> Đã chép</> : 'Sao chép'}</button>}</div>}
       {pending && (remaining > 0 ? <p className="payment-deadline"><Clock3 size={18} aria-hidden="true" />
@@ -497,7 +523,7 @@ function BookingDetail({ id, initialDetail = null, call, fail, changed, staff = 
       </>}
     </div>
     {canPay && payment?.qrUrl && <figure className="payment-qr">
-      <figcaption>Quét VietQR để thanh toán</figcaption>
+      <figcaption>{balance > 0 ? 'Quét VietQR để đặt cọc 50%' : 'Quét VietQR để thanh toán'}</figcaption>
       <img src={payment.qrUrl} alt="VietQR thanh toán cho lượt đặt này" />
     </figure>}
   </section>;
@@ -741,14 +767,15 @@ function Management({ session, call, fail }) {
             if (await action(prefix + '/pitches', 'POST', { name: data.get('name'), isActive: true })) form.reset();
           } finally { setAddingPitch(false); }
         }}>
-          <label>Tên sân mới<input name="name" maxLength="120" placeholder="Ví dụ: Sân 4" required /></label>
-          <button className="primary" disabled={addingPitch}><Plus size={17} aria-hidden="true" />{addingPitch ? 'Đang thêm…' : 'Thêm sân'}</button>
+          <label>Tên sân mới<input name="name" maxLength="120" placeholder="Ví dụ: Sân 1" required disabled={!pitches || pitches.length >= 3} /></label>
+          <button className="primary" disabled={addingPitch || !pitches || pitches.length >= 3}><Plus size={17} aria-hidden="true" />{addingPitch ? 'Đang thêm…' : 'Thêm sân'}</button>
         </form>
+        {pitches?.length >= 3 && <p className="muted">Chi nhánh đã có đủ 3 sân. Bạn có thể sửa hoặc bật lại sân số 1–3.</p>}
         {pitches?.length === 0 && <p className="muted">Chi nhánh chưa có sân.</p>}
         {pitches?.map(pitch => <form key={pitch.id} className="pitch-edit" onSubmit={submit(data =>
         action('/management/pitches/' + pitch.id, 'PUT', { name: data.name, isActive: data.active === 'on' }))}>
         <label>Tên sân số {pitch.pitchNumber}<input name="name" defaultValue={pitch.name} required /></label>
-        <label className="check"><input name="active" type="checkbox" defaultChecked={pitch.isActive} /> Đang hoạt động</label>
+        <label className="check"><input name="active" type="checkbox" defaultChecked={pitch.isActive} disabled={pitch.pitchNumber > 3} /> {pitch.pitchNumber > 3 ? 'Sân lưu trữ' : 'Đang hoạt động'}</label>
         <button>Lưu sân</button></form>)}</div>
       <div><h2>Bảng giá</h2><div className="rows">{prices?.map(row => <div key={row.id}>
         <span>{row.effectiveFrom} · {money(row.regularPriceVnd)} / {money(row.peakPriceVnd)}</span>

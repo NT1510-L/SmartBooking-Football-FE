@@ -289,8 +289,9 @@ small { font-weight: 450; }
 .demo-note { color: #6c4f17; background: #fff5db; border-radius: 9px; padding: 9px 12px; }
 .status { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 100px; background: #edf2ef; color: #425c4d; font-size: 12px; font-weight: 700; }
 .status-PendingPayment { background: #fff1d1; color: #715014; }
-.status-Confirmed, .status-Completed { background: #e1f3e4; color: #1d613c; }
-.status-Cancelled, .status-Expired { background: #f8e9e5; color: #8b3228; }
+.status-Confirmed, .status-CheckedIn, .status-Completed { background: #e1f3e4; color: #1d613c; }
+.status-Cancelled, .status-Expired, .status-NoShow { background: #f8e9e5; color: #8b3228; }
+.payment-breakdown { margin-bottom: 18px; }
 .auth { max-width: 460px; margin: 28px auto; }
 .error { background: #fff0ed; color: #841f15; border: 1px solid #f2cbc3; border-radius: 12px; margin-bottom: 14px; padding: 7px 10px; display: flex; align-items: center; gap: 8px; }
 .error > svg { flex: none; }
