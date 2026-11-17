@@ -6,7 +6,9 @@ import {
 } from 'lucide-react';
 import './style.css';
 
-const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+const base = import.meta.env.MODE === 'vercel'
+  ? ''
+  : (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
 const money = value => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(value);
 const utcDate = value => new Date(value.endsWith('Z') ? value : value + 'Z');
 const time = value => value ? new Intl.DateTimeFormat('vi-VN', {

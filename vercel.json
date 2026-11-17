@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build -- --mode vercel",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://smartbooking-football-be.onrender.com/api/:path*"
+    }
+  ]
+}
