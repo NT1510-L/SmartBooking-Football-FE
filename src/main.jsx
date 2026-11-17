@@ -8,11 +8,24 @@ import './style.css';
 
 const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
 const money = value => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(value);
+const utcDate = value => new Date(value.endsWith('Z') ? value : value + 'Z');
 const time = value => value ? new Intl.DateTimeFormat('vi-VN', {
   dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh'
-}).format(new Date(value.endsWith('Z') ? value : value + 'Z')) : '';
+}).format(utcDate(value)) : '';
 const today = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date());
+const hourText = hour => `${String(hour).padStart(2, '0')}:00`;
+const dayText = date => date ? date.split('-').reverse().join('/') : 'Chưa chọn';
 const labels = { PendingPayment: 'Chờ thanh toán', Confirmed: 'Đã xác nhận', Completed: 'Hoàn tất', Cancelled: 'Đã hủy', Expired: 'Hết hạn' };
+
+function focusSection(element) {
+  element?.focus({ preventScroll: true });
+  element?.scrollIntoView({ block: 'start' });
+}
+
+function bookingFromUrl() {
+  const id = new URLSearchParams(window.location.search).get('booking');
+  return /^[1-9]\d{0,18}$/.test(id ?? '') ? id : null;
+}
 
 async function request(path, token, method = 'GET', body) {
   const response = await fetch(base + '/api' + path, {
@@ -27,21 +40,38 @@ async function request(path, token, method = 'GET', body) {
       403: 'Bạn không có quyền thực hiện thao tác này.', 404: 'Không tìm thấy dữ liệu.'
     })[response.status] || 'Yêu cầu thất bại (' + response.status + ').');
     failure.status = response.status;
+    failure.code = error.code;
+    failure.amountVnd = error.amountVnd;
     throw failure;
   }
   return response.status === 204 ? null : response.json();
 }
 
-function useData(load, dependencies, onError) {
+function useResult(load, dependencies, onError) {
   const [result, setResult] = useState(null);
   useEffect(() => {
     let current = true;
-    load().then(value => { if (current) setResult({ dependencies, value }); })
-      .catch(error => { if (current) { setResult({ dependencies, value: [] }); onError(error.message); } });
+    load().then(data => { if (current) setResult({ dependencies, value: { data } }); })
+      .catch(error => {
+        if (!current) return;
+        setResult({ dependencies, value: { error: error.message } });
+        onError?.(error.message);
+      });
     return () => { current = false; };
   }, dependencies);
   return result && dependencies.every((value, index) => Object.is(value, result.dependencies[index]))
     ? result.value : null;
+}
+
+function useData(load, dependencies, onError) {
+  const result = useResult(load, dependencies, onError);
+  if (!result) return null;
+  return result.error ? [] : result.data;
+}
+
+function LoadError({ message, retry }) {
+  return <div className="load-error" role="alert"><CircleAlert size={18} aria-hidden="true" />
+    <span>{message}</span><button type="button" onClick={retry}>Thử lại</button></div>;
 }
 
 function Status({ value }) {
@@ -54,23 +84,68 @@ function App() {
     try { return JSON.parse(sessionStorage.getItem('football-session')); } catch { return null; }
   });
   const [screen, setScreen] = useState('browse');
+  const [paymentId, setPaymentId] = useState(bookingFromUrl);
+  const [initialPayment, setInitialPayment] = useState(null);
+  const [paymentRevision, setPaymentRevision] = useState(0);
   const [error, setError] = useState('');
   const [browseVersion, setBrowseVersion] = useState(0);
-  function navigate(next) { setError(''); setScreen(next); }
+  const role = session?.role;
+  const activeScreen = paymentId ? (role === 'User' ? 'payment' : 'login') : screen;
+
+  useEffect(() => {
+    function restorePayment() {
+      setPaymentId(bookingFromUrl());
+      setInitialPayment(null);
+      setError('');
+    }
+    window.addEventListener('popstate', restorePayment);
+    return () => window.removeEventListener('popstate', restorePayment);
+  }, []);
+
+  function setPaymentRoute(id) {
+    const url = new URL(window.location.href);
+    if (id) {
+      url.searchParams.set('booking', id);
+      url.hash = '';
+    } else url.searchParams.delete('booking');
+    if (url.href !== window.location.href) window.history.pushState(null, '', url);
+    setPaymentId(id);
+  }
+  function navigate(next) {
+    if (paymentId) setPaymentRoute(null);
+    setInitialPayment(null);
+    setError('');
+    setScreen(next);
+    window.scrollTo(0, 0);
+  }
+  function openPayment(id, detail = null) {
+    setError('');
+    setInitialPayment(detail);
+    setPaymentRoute(String(id));
+    window.scrollTo(0, 0);
+  }
+  function clearSession() {
+    setSession(null);
+    sessionStorage.removeItem('football-session');
+    setBrowseVersion(value => value + 1);
+    setInitialPayment(null);
+  }
   function authenticate(next) {
     setSession(next);
-    if (next) sessionStorage.setItem('football-session', JSON.stringify(next));
-    else { sessionStorage.removeItem('football-session'); setBrowseVersion(value => value + 1); }
-    navigate(next && next.role !== 'User' ? 'manage' : 'browse');
+    sessionStorage.setItem('football-session', JSON.stringify(next));
+    if (paymentId) setError('');
+    else navigate(next.role === 'User' ? 'browse' : 'manage');
   }
   const call = async (path, method, body) => {
     try { return await request(path, session?.token, method, body); }
     catch (error) {
-      if (session && error.status === 401) { authenticate(null); navigate('login'); }
+      if (session && error.status === 401) {
+        clearSession();
+        if (!bookingFromUrl()) navigate('login');
+      }
       throw error;
     }
   };
-  const role = session?.role;
   const links = [
     ['browse', 'Tìm sân', MapPin],
     ...(role === 'User' ? [['bookings', 'Lịch đặt của tôi', CalendarDays], ['notifications', 'Thông báo', Bell]] : []),
@@ -82,29 +157,36 @@ function App() {
       <span className="brand-icon"><Goal size={22} aria-hidden="true" /></span><span>Smart<span>Booking</span></span>
     </button>
       <nav aria-label="Điều hướng chính">
-        {links.map(([key, label, Icon]) => <button key={key} aria-current={screen === key ? 'page' : undefined} onClick={() => navigate(key)}>
+        {links.map(([key, label, Icon]) => <button key={key} aria-current={activeScreen === key ? 'page' : undefined} onClick={() => navigate(key)}>
           <Icon size={17} aria-hidden="true" />{label}</button>)}
       </nav>
       <div className="account">{session ? <><span className="account-name">{session.fullName}</span>
-        <button onClick={() => authenticate(null)} aria-label="Đăng xuất" title="Đăng xuất"><LogOut size={17} aria-hidden="true" /></button></>
+        <button onClick={() => { clearSession(); navigate('browse'); }} aria-label="Đăng xuất" title="Đăng xuất"><LogOut size={17} aria-hidden="true" /></button></>
         : <button className="login-button" onClick={() => navigate('login')}><LogIn size={16} aria-hidden="true" /> Đăng nhập</button>}</div>
     </div></header>
     <main>
       {error && <div role="alert" className="error"><CircleAlert size={19} aria-hidden="true" /><span>{error}</span>
         <button onClick={() => setError('')} aria-label="Đóng lỗi"><X size={17} aria-hidden="true" /></button></div>}
-      {screen === 'login' && <Login onLogin={authenticate} fail={setError} />}
-      <div hidden={screen !== 'browse'}><Browse key={browseVersion} call={call} session={session}
-        login={() => navigate('login')} fail={setError} visible={screen === 'browse'} /></div>
-      {screen === 'bookings' && role === 'User' && <Bookings call={call} fail={setError} admin={false} />}
-      {screen === 'staffBookings' && (role === 'Manager' || role === 'Admin') && <Bookings call={call} fail={setError} admin={role === 'Admin'} staff />}
-      {screen === 'notifications' && role === 'User' && <Notifications call={call} fail={setError} />}
-      {screen === 'manage' && (role === 'Manager' || role === 'Admin') && <Management session={session} call={call} fail={setError} />}
-      {screen === 'receipts' && role === 'Admin' && <PaymentReceipts call={call} fail={setError} />}
+      {activeScreen === 'login' && <Login onLogin={authenticate} fail={setError} paymentId={paymentId} />}
+      <div hidden={activeScreen !== 'browse'}><Browse key={browseVersion} call={call} session={session}
+        login={() => navigate('login')} fail={setError} visible={activeScreen === 'browse'}
+        openPayment={openPayment} paymentRevision={paymentRevision} /></div>
+      {screen === 'bookings' && role === 'User' && <div hidden={activeScreen !== 'bookings'}>
+        <Bookings call={call} fail={setError} openPayment={openPayment} paymentRevision={paymentRevision} /></div>}
+      {activeScreen === 'payment' && <div className="checkout-page">
+        <button type="button" className="link" onClick={() => navigate('bookings')}><ChevronLeft size={17} aria-hidden="true" /> Lịch đặt của tôi</button>
+        <BookingDetail key={paymentId} id={paymentId} initialDetail={String(initialPayment?.booking.id) === paymentId ? initialPayment : null}
+          call={call} fail={setError} changed={() => setPaymentRevision(value => value + 1)} />
+      </div>}
+      {activeScreen === 'staffBookings' && (role === 'Manager' || role === 'Admin') && <Bookings call={call} fail={setError} staff />}
+      {activeScreen === 'notifications' && role === 'User' && <Notifications call={call} fail={setError} />}
+      {activeScreen === 'manage' && (role === 'Manager' || role === 'Admin') && <Management session={session} call={call} fail={setError} />}
+      {activeScreen === 'receipts' && role === 'Admin' && <PaymentReceipts call={call} fail={setError} />}
     </main>
   </>;
 }
 
-function Login({ onLogin, fail }) {
+function Login({ onLogin, fail, paymentId }) {
   const [register, setRegister] = useState(false);
   const [busy, setBusy] = useState(false);
   async function submit(event) {
@@ -119,6 +201,7 @@ function Login({ onLogin, fail }) {
   }
   return <section className="panel auth"><span className="panel-icon"><LogIn size={23} aria-hidden="true" /></span>
     <h1>{register ? 'Tạo tài khoản' : 'Đăng nhập'}</h1>
+    {paymentId && <p className="muted">Đăng nhập bằng tài khoản User để xem lịch đặt #{paymentId}.</p>}
     <form onSubmit={submit}>
       {register && <label>Họ tên<input name="fullName" required maxLength="150" /></label>}
       <label>Email<input name="email" type="email" autoComplete="email" required /></label>
@@ -129,84 +212,206 @@ function Login({ onLogin, fail }) {
   </section>;
 }
 
-function Browse({ call, session, login, fail, visible }) {
-  const [search, setSearch] = useState('');
-  const [area, setArea] = useState('');
+function Browse({ call, session, login, fail, visible, openPayment, paymentRevision }) {
+  const [filters, setFilters] = useState({ search: '', area: '' });
   const [page, setPage] = useState(1);
   const [branch, setBranch] = useState(null);
   const [pitch, setPitch] = useState(null);
   const [date, setDate] = useState(today);
   const [hour, setHour] = useState(null);
-  const [bookingId, setBookingId] = useState(null);
+  const [createdBooking, setCreatedBooking] = useState(null);
+  const [priceChange, setPriceChange] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const detailAnchor = useRef(null);
-  const branches = useData(() => call('/branches?' + new URLSearchParams({ search, area, page, size: 9 })), [search, area, page], fail);
-  const pitches = useData(() => branch ? call('/branches/' + branch.id + '/pitches') : Promise.resolve([]), [branch], fail);
-  const slots = useData(() => pitch && date ? call('/pitches/' + pitch.id + '/availability?date=' + date) : Promise.resolve([]), [pitch, date, revision], fail);
-  const quote = useData(() => branch && date && hour !== null ? call('/branches/' + branch.id + '/quote?date=' + date + '&hour=' + hour) : Promise.resolve(null), [branch, date, hour], fail);
+  const [catalogueRevision, setCatalogueRevision] = useState(0);
+  const [scheduleRevision, setScheduleRevision] = useState(0);
+  const [quoteRevision, setQuoteRevision] = useState(0);
+  const searchForm = useRef(null);
+  const resultsAnchor = useRef(null);
+  const scheduleAnchor = useRef(null);
+  const branches = useResult(() => call('/branches?' + new URLSearchParams({ ...filters, page, size: 9 })),
+    [filters, page, catalogueRevision]);
+  const pitches = useResult(() => branch ? call(`/branches/${branch.id}/pitches`) : Promise.resolve([]), [branch, catalogueRevision]);
+  const slots = useResult(() => pitch && date ? call(`/pitches/${pitch.id}/availability?date=${date}`) : Promise.resolve([]),
+    [pitch, date, scheduleRevision, paymentRevision]);
+  const quote = useResult(() => branch && date && hour !== null
+    ? call(`/branches/${branch.id}/quote?${new URLSearchParams({ date, hour })}`) : Promise.resolve(null),
+    [branch, date, hour, quoteRevision]);
+  const amount = createdBooking?.payment?.amountVnd ?? priceChange?.amountVnd ?? quote?.data?.amount;
+  const canBook = !createdBooking && amount > 0 && slots?.data?.some(slot => slot.hour === hour && slot.available);
+
+  function search(event) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    setFilters({ search: data.get('search').trim(), area: data.get('area').trim() });
+    setPage(1);
+    focusSection(resultsAnchor.current);
+  }
+  function resetSearch() {
+    searchForm.current.elements.search.value = '';
+    searchForm.current.elements.area.value = '';
+    setFilters({ search: '', area: '' });
+    setPage(1);
+  }
+  function chooseBranch(item) {
+    if (branch?.id === item.id) {
+      focusSection(scheduleAnchor.current);
+      return;
+    }
+    setBranch(item);
+    setPitch(null);
+    chooseHour(null);
+  }
+  function chooseDate(value) {
+    setDate(value);
+    chooseHour(null);
+  }
+  function chooseHour(value) {
+    setHour(value);
+    setCreatedBooking(null);
+    setPriceChange(null);
+  }
   async function book() {
+    if (!canBook || busy) return;
     if (!session) return login();
     setBusy(true); fail('');
     try {
-      const result = await call('/bookings', 'POST', { pitchId: pitch.id, date, hour });
-      setBookingId(result.booking.id);
+      const result = await call('/bookings', 'POST', { pitchId: pitch.id, date, hour, expectedAmountVnd: amount });
+      setCreatedBooking(result);
+      setPriceChange(null);
+      setScheduleRevision(value => value + 1);
+      openPayment(result.booking.id, result);
     } catch (error) {
-      if (error.status === 409) { setHour(null); setRevision(value => value + 1); }
+      if (error.status === 409 && error.code === 'PriceChanged' && Number.isSafeInteger(error.amountVnd) && error.amountVnd > 0) {
+        setPriceChange({ previousAmountVnd: amount, amountVnd: error.amountVnd });
+        return;
+      }
+      if (error.status === 409) { chooseHour(null); setScheduleRevision(value => value + 1); }
+      if (error.status === 503) {
+        setPriceChange(null);
+        setQuoteRevision(value => value + 1);
+      }
       fail(error.message);
     }
     finally { setBusy(false); }
   }
   useEffect(() => {
-    if (bookingId && visible) detailAnchor.current?.scrollIntoView({ block: 'nearest' });
-  }, [bookingId, visible]);
+    if (branch && visible) focusSection(scheduleAnchor.current);
+  }, [branch, visible]);
   return <>
-    <section className="hero"><div className="hero-copy"><h1>Đặt sân bóng</h1>
-      <p>Tìm sân trống, chọn giờ đá và giữ chỗ cho đội của bạn.</p>
-      <a href="#chi-nhanh" className="hero-action">Chọn sân <ArrowRight size={18} aria-hidden="true" /></a></div></section>
-    <div className="workspace">
-      <section id="chi-nhanh" className="panel"><h2 className="section-title"><MapPin size={21} aria-hidden="true" /> Chi nhánh</h2><div className="filters">
-        <div className="input-icon"><Search size={17} aria-hidden="true" /><input aria-label="Tên chi nhánh" placeholder="Tìm theo tên" value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} /></div>
-        <input aria-label="Khu vực" placeholder="Khu vực" value={area} onChange={e => { setArea(e.target.value); setPage(1); }} />
-      </div><div className="branches">
-        {branches?.map(item => <button aria-pressed={branch?.id === item.id} disabled={busy} className={branch?.id === item.id ? 'selected branch' : 'branch'} key={item.id} onClick={() => {
-          setBranch(item); setPitch(null); setHour(null); setBookingId(null);
-        }}><span className="branch-icon"><MapPin size={18} aria-hidden="true" /></span><span className="branch-text">
-          <strong>{item.name}</strong><small>{item.address} · {item.area}</small></span><ChevronRight size={17} aria-hidden="true" /></button>)}
-        {branches === null && <p role="status" className="muted">Đang tải chi nhánh…</p>}
-        {branches?.length === 0 && <p>Không tìm thấy chi nhánh.</p>}
-      </div><Pager page={page} setPage={setPage} more={branches?.length === 9} /></section>
-      <section className="panel"><h2 className="section-title"><CalendarDays size={21} aria-hidden="true" />{branch?.name || 'Sân và khung giờ'}</h2>
-        {!branch && <div className="empty"><CalendarDays size={29} aria-hidden="true" /><p>Chọn chi nhánh để xem sân và giờ trống.</p></div>}
-        {branch && <>
-          <div className="chips">{pitches?.map(item => <button key={item.id} disabled={busy} aria-pressed={pitch?.id === item.id} className={pitch?.id === item.id ? 'selected' : ''}
-            onClick={() => { setPitch(item); setHour(null); setBookingId(null); }}>{item.name}</button>)}</div>
-          {pitches?.length === 0 && <p>Chi nhánh chưa có sân đang hoạt động.</p>}
-          {pitch && <><label>Ngày đá<input type="date" disabled={busy} min={today()} value={date} onChange={e => {
-            setDate(e.target.value); setHour(null); setBookingId(null);
-          }} /></label>
-          {date && slots === null && <p role="status" className="muted">Đang tải khung giờ…</p>}
-          {date && slots?.length > 0 && !slots.some(slot => slot.available) && <p className="muted">Ngày này không còn giờ trống.</p>}
-          <div className="slots">{slots?.map(slot => <button key={slot.hour} disabled={busy || !slot.available} aria-pressed={hour === slot.hour}
-            className={hour === slot.hour ? 'selected' : ''} onClick={() => { setHour(slot.hour); setBookingId(null); }}>
-            {String(slot.hour).padStart(2, '0')}:00
-          </button>)}</div></>}
-          {hour !== null && quote?.amount > 0 && !bookingId && <div className="checkout"><div><small>Giá 60 phút</small><strong>{money(quote.amount)}</strong></div>
-            {session?.role && session.role !== 'User' ? <span>Dùng tài khoản User để đặt sân.</span>
-              : <button className="primary" disabled={busy} onClick={book}>{busy ? 'Đang giữ sân…' : session ? 'Giữ sân và thanh toán' : 'Đăng nhập để đặt'} <ArrowRight size={17} aria-hidden="true" /></button>}</div>}
-        </>}
+    <section className="hero" aria-labelledby="hero-title">
+      <div className="hero-copy">
+        <h1 id="hero-title">Đặt sân bóng<br /> <span>theo lịch của bạn.</span></h1>
+        <p>Tìm sân gần bạn, xem giờ trống và giữ sân cho trận đấu tiếp theo.</p>
+        <form ref={searchForm} className="hero-search" onSubmit={search}>
+          <label>Tên chi nhánh<span className="input-icon"><Search size={17} aria-hidden="true" /><input name="search" type="search" placeholder="Ví dụ: Cộng Hòa" /></span></label>
+          <label>Khu vực<span className="input-icon"><MapPin size={17} aria-hidden="true" /><input name="area" placeholder="Tất cả khu vực" /></span></label>
+          <button className="hero-action">Tìm sân <ArrowRight size={18} aria-hidden="true" /></button>
+        </form>
+      </div>
+    </section>
+
+    <section id="chi-nhanh" className="catalogue" aria-labelledby="branches-heading">
+      <div className="catalogue-heading">
+        <h2 ref={resultsAnchor} id="branches-heading" tabIndex={-1}>Chọn chi nhánh</h2>
+        {(filters.search || filters.area) && <button type="button" className="link" onClick={resetSearch}><X size={16} aria-hidden="true" /> Xóa bộ lọc</button>}
+      </div>
+      {!branches && <p className="empty" role="status">Đang tải chi nhánh…</p>}
+      {branches?.error && <LoadError message={branches.error} retry={() => setCatalogueRevision(value => value + 1)} />}
+      {branches?.data?.length === 0 && <p className="empty">Không tìm thấy chi nhánh phù hợp.</p>}
+      <div className="branches">
+        {branches?.data?.map(item => (
+          <button key={item.id} className="branch" type="button" aria-pressed={branch?.id === item.id}
+            disabled={busy} onClick={() => chooseBranch(item)}>
+            <span className="branch-top"><span className="branch-icon"><Goal size={21} aria-hidden="true" /></span><span>{item.area}</span></span>
+            <span className="branch-text"><strong>{item.name}</strong><small>{item.address}</small></span>
+            <span className="branch-bottom"><span><Clock3 size={15} aria-hidden="true" /> {hourText(item.openingHour)}–{hourText(item.closingHour)}</span>
+              <span className="branch-link">Xem lịch <ArrowRight size={16} aria-hidden="true" /></span></span>
+          </button>
+        ))}
+      </div>
+      <Pager page={page} setPage={setPage} more={branches?.data?.length === 9} />
+    </section>
+
+    {branch && <div className="workspace">
+      <section className="panel booking-options" aria-labelledby="schedule-heading">
+        <div className="booking-heading"><h2 id="schedule-heading" ref={scheduleAnchor} tabIndex={-1}>Chọn sân và giờ đá</h2>
+          <a href="#chi-nhanh">Đổi chi nhánh</a></div>
+        <p className="booking-location"><MapPin size={17} aria-hidden="true" /> {branch.name}</p>
+        {!pitches && <p role="status" className="muted">Đang tải danh sách sân…</p>}
+        {pitches?.error && <LoadError message={pitches.error} retry={() => setCatalogueRevision(value => value + 1)} />}
+        {pitches?.data?.length === 0 && <p className="empty">Chi nhánh chưa có sân đang hoạt động.</p>}
+        {pitches?.data?.length > 0 && <fieldset className="pitch-fieldset"><legend>Sân</legend><div className="pitch-choices">
+          {pitches.data.map(item => <button key={item.id} type="button" disabled={busy} aria-pressed={pitch?.id === item.id}
+            onClick={() => { if (pitch?.id !== item.id) { setPitch(item); chooseHour(null); } }}><Goal size={17} aria-hidden="true" /> {item.name}</button>)}
+        </div></fieldset>}
+        {pitch && <div className="time-picker">
+          <label>Ngày đá<input type="date" disabled={busy} min={today()} value={date} onChange={event => chooseDate(event.target.value)} /></label>
+          {date && <fieldset className="slot-fieldset"><legend>Khung giờ <small>60 phút</small></legend>
+            {!slots && <p role="status" className="muted">Đang tải khung giờ…</p>}
+            {slots?.error && <LoadError message={slots.error} retry={() => setScheduleRevision(value => value + 1)} />}
+            {slots?.data && !slots.data.some(slot => slot.available) && <p className="muted">Ngày này không còn giờ trống.</p>}
+            <div className="slots">{slots?.data?.map(slot => (
+              <button key={slot.hour} type="button" disabled={busy || !slot.available} aria-pressed={hour === slot.hour}
+                aria-label={slot.available ? hourText(slot.hour) : `${hourText(slot.hour)} · Không khả dụng`}
+                className={!slot.available ? 'slot-unavailable' : ''} onClick={() => { if (hour !== slot.hour || createdBooking) chooseHour(slot.hour); }}>
+                {hourText(slot.hour)}
+              </button>
+            ))}</div>
+            {slots?.data?.length > 0 && <div className="slot-legend"><span>Còn trống</span><span>Đang chọn</span><span>Không khả dụng</span></div>}
+          </fieldset>}
+        </div>}
       </section>
-    </div>
-    {bookingId && <div ref={detailAnchor}><BookingDetail key={bookingId} id={bookingId} call={call} fail={fail}
-      changed={() => setRevision(value => value + 1)} /></div>}
+
+      <aside className="panel booking-summary" aria-labelledby="summary-heading">
+        <h2 id="summary-heading" className="section-title"><CalendarDays size={21} aria-hidden="true" /> Tóm tắt đặt sân</h2>
+        <dl className="summary-details">
+          <div><dt>Chi nhánh</dt><dd>{branch.name}</dd></div>
+          <div><dt>Sân</dt><dd>{pitch?.name ?? 'Chưa chọn'}</dd></div>
+          <div><dt>Ngày đá</dt><dd>{dayText(date)}</dd></div>
+          <div><dt>Khung giờ</dt><dd>{hour === null ? 'Chưa chọn' : `${hourText(hour)}–${hourText(hour + 1)}`}</dd></div>
+        </dl>
+        <div className="summary-total"><span>Tổng tiền</span><strong>{amount > 0 ? money(amount) : '—'}</strong></div>
+        {priceChange && <p className="price-change" role="status">Giá sân đổi từ <strong>{money(priceChange.previousAmountVnd)}</strong> thành <strong>{money(priceChange.amountVnd)}</strong>. Vui lòng xác nhận giá mới.</p>}
+        {!createdBooking && hour !== null && !quote && <p className="muted" role="status">Đang lấy báo giá…</p>}
+        {!createdBooking && quote?.error && <LoadError message={quote.error} retry={() => setQuoteRevision(value => value + 1)} />}
+        {!createdBooking && session?.role && session.role !== 'User' ? <p className="muted">Dùng tài khoản User để đặt sân.</p> :
+          !createdBooking && <button type="button" className="primary summary-action" disabled={!canBook || busy} onClick={book}>
+            {busy ? 'Đang giữ sân…' : priceChange ? 'Xác nhận giá mới và giữ sân' : session ? 'Giữ sân và thanh toán' : 'Đăng nhập để đặt'} <ArrowRight size={18} aria-hidden="true" />
+          </button>}
+        {createdBooking && <button type="button" className="summary-action" onClick={() => openPayment(createdBooking.booking.id)}>
+          Xem lịch #{createdBooking.booking.id} <ArrowRight size={18} aria-hidden="true" />
+        </button>}
+      </aside>
+    </div>}
+
   </>;
 }
 
-function BookingDetail({ id, call, fail, changed, canCancel = true, endpoint = '/bookings/' }) {
-  const [detail, setDetail] = useState(null);
+function BookingDetail({ id, initialDetail = null, call, fail, changed, staff = false }) {
+  const endpoint = staff ? '/management/bookings/' : '/bookings/';
+  const [detail, setDetail] = useState(initialDetail);
+  const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [now, setNow] = useState(Date.now);
+  const previousStatus = useRef(initialDetail?.booking.status);
+  const expiresAt = detail?.booking.status === 'PendingPayment' ? detail.booking.expiresAtUtc : null;
+  const remaining = expiresAt ? Math.max(0, Math.ceil((utcDate(expiresAt).getTime() - now) / 1000)) : 0;
+
+  useEffect(() => {
+    if (!expiresAt) return;
+    const deadline = utcDate(expiresAt).getTime();
+    function tick() {
+      const currentTime = Date.now();
+      setNow(currentTime);
+      if (currentTime >= deadline) clearInterval(timer);
+    }
+    const timer = setInterval(tick, 1000);
+    tick();
+    return () => clearInterval(timer);
+  }, [expiresAt]);
+
   useEffect(() => {
     let current = true;
     let timer;
@@ -214,45 +419,73 @@ function BookingDetail({ id, call, fail, changed, canCancel = true, endpoint = '
       try {
         const next = await call(endpoint + id);
         if (!current) return;
+        setNow(Date.now());
         setDetail(next);
-        if (next.booking.status === 'PendingPayment') timer = setTimeout(refresh, 3000);
-        else changed?.();
+        setLoadError('');
+        const status = next.booking.status;
+        if (status === 'PendingPayment') timer = setTimeout(refresh, 3000);
+        else if (previousStatus.current === 'PendingPayment') changed();
+        previousStatus.current = status;
       } catch (error) {
         if (!current) return;
-        fail(error.message);
+        setLoadError(error.message);
         if (!error.status || error.status >= 500) timer = setTimeout(refresh, 5000);
       }
     }
     refresh();
     return () => { current = false; clearTimeout(timer); };
   }, [id, revision, endpoint]);
-  if (!detail) return <section className="panel"><p>Đang tải lịch đặt…</p></section>;
+  function reload() {
+    setLoadError('');
+    setRevision(value => value + 1);
+  }
+  if (!detail) return <section className="panel">
+    {loadError ? <><p role="alert">{loadError}</p><button onClick={reload}>Thử lại</button></> : <p role="status">Đang tải lịch đặt…</p>}
+  </section>;
   const { booking, payment } = detail;
+  const pending = booking.status === 'PendingPayment';
+  const canPay = !staff && pending && remaining > 0;
+  const countdown = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
   async function cancel() {
     setBusy(true);
+    fail('');
     try {
-      await call('/bookings/' + id + '/cancel', 'POST');
-      setRevision(value => value + 1);
-    } catch (error) { fail(error.message); }
+      await call(endpoint + id + '/cancel', 'POST');
+      reload();
+    } catch (error) {
+      if (error.status === 409) reload();
+      fail(error.message);
+    }
     finally { setBusy(false); }
   }
   async function copyCode() {
     try { await navigator.clipboard.writeText(payment.code); setCopied(true); }
     catch { fail('Không sao chép được. Bạn có thể chọn và chép mã trực tiếp.'); }
   }
-  return <section className="panel payment"><div>
-    <h2 className="section-title"><Wallet size={21} aria-hidden="true" /> Lịch đặt #{id}</h2>
-    <div className="payment-meta"><span>{time(booking.startAtUtc)}</span><Status value={booking.status} /></div>
-    {payment && <><p className="payment-amount">{money(payment.amountVnd)}</p><div className="payment-meta">
-      <span>Mã thanh toán <code>{payment.code}</code></span><button onClick={copyCode}>{copied ? <><Check size={15} /> Đã chép</> : 'Sao chép'}</button></div></>}
-    {booking.status === 'PendingPayment' && <>
-      <p>Giữ sân đến {time(booking.expiresAtUtc)}.</p>
-      {payment?.isDemo && <p className="demo-note">Giao dịch mô phỏng. Dùng script demo để xác nhận, không chuyển tiền thật.</p>}
-      {!payment?.qrUrl && !payment?.isDemo && <p>Chưa có mã VietQR cho lịch này.</p>}
-      {canCancel && <button disabled={busy} onClick={cancel}>Hủy giữ sân</button>}
-    </>}
-    </div>{booking.status === 'PendingPayment' && payment?.qrUrl &&
-      <img src={payment.qrUrl} alt="VietQR thanh toán cho lượt đặt này" />}</section>;
+  return <section className="panel payment">
+    <div className="payment-content">
+      <div className="payment-heading"><h2 className="section-title"><Wallet size={22} aria-hidden="true" /> Lịch đặt #{id}</h2>
+        <Status value={booking.status} /></div>
+      <p className="payment-time"><CalendarDays size={16} aria-hidden="true" /> {time(booking.startAtUtc)}</p>
+      {loadError && <LoadError message={loadError} retry={reload} />}
+      <p className="payment-value"><span>{canPay ? 'Số tiền cần chuyển' : 'Tổng tiền'}</span>
+        <strong>{money(payment?.amountVnd ?? booking.priceVnd)}</strong></p>
+      {payment && <div className="payment-code"><div><span>{canPay ? 'Nội dung chuyển khoản' : 'Mã thanh toán'}</span><code>{payment.code}</code></div>
+        {canPay && <button type="button" onClick={copyCode}>{copied ? <><Check size={15} aria-hidden="true" /> Đã chép</> : 'Sao chép'}</button>}</div>}
+      {pending && (remaining > 0 ? <p className="payment-deadline"><Clock3 size={18} aria-hidden="true" />
+        <span>Giữ sân đến {time(expiresAt)}</span><strong aria-label="Thời gian còn lại">{countdown}</strong></p>
+        : <p role="status">Đã đến hạn giữ sân. Đang kiểm tra trạng thái thanh toán…</p>)}
+      {canPay && <>
+        {payment?.isDemo && <p className="demo-note">Giao dịch mô phỏng. Dùng script demo để xác nhận, không chuyển tiền thật.</p>}
+        {!payment?.qrUrl && !payment?.isDemo && <p>Chưa có mã VietQR cho lịch này.</p>}
+        <button type="button" className="cancel-hold" disabled={busy} onClick={cancel}>Hủy giữ sân</button>
+      </>}
+    </div>
+    {canPay && payment?.qrUrl && <figure className="payment-qr">
+      <figcaption>Quét VietQR để thanh toán</figcaption>
+      <img src={payment.qrUrl} alt="VietQR thanh toán cho lượt đặt này" />
+    </figure>}
+  </section>;
 }
 
 function Pager({ page, setPage, more }) {
@@ -261,7 +494,7 @@ function Pager({ page, setPage, more }) {
     <span>Trang {page}</span><button disabled={!more} onClick={() => setPage(page + 1)}>Sau <ChevronRight size={15} /></button></div>;
 }
 
-function Bookings({ call, fail, admin, staff = false }) {
+function Bookings({ call, fail, staff = false, openPayment, paymentRevision }) {
   const [branchId, setBranchId] = useState('');
   const [status, setStatus] = useState('');
   const [date, setDate] = useState('');
@@ -269,11 +502,11 @@ function Bookings({ call, fail, admin, staff = false }) {
   const [page, setPage] = useState(1);
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState(null);
-  const branches = useData(() => staff ? call('/management/branches') : admin ? call('/admin/branches') : Promise.resolve([]), [admin, staff], fail);
+  const branches = useData(() => staff ? call('/management/branches') : Promise.resolve([]), [staff], fail);
   const endpoint = staff ? '/management/bookings' : '/bookings';
   const rows = useData(() => call(endpoint + '?' + new URLSearchParams({
     status, sort, page, size: 15, ...(date && { date }), ...(branchId && { branchId })
-  })), [status, date, sort, branchId, page, revision], fail);
+  })), [status, date, sort, branchId, page, revision, paymentRevision], fail);
   return <><section className="panel"><h1>{staff ? 'Lịch vận hành' : 'Lịch đặt của tôi'}</h1><div className="filters">
     {staff && <select aria-label="Chi nhánh" value={branchId} onChange={e => { setBranchId(e.target.value); setPage(1); }}>
       <option value="">Tất cả chi nhánh</option>{branches?.map(branch => <option value={branch.id} key={branch.id}>{branch.name}</option>)}
@@ -284,11 +517,14 @@ function Bookings({ call, fail, admin, staff = false }) {
     <select aria-label="Sắp xếp" value={sort} onChange={e => { setSort(e.target.value); setPage(1); }}>
       <option value="desc">Giờ đá giảm dần</option><option value="asc">Giờ đá tăng dần</option>
     </select></div>
-    <div className="rows">{rows?.map(row => <button key={row.booking.id} onClick={() => setSelected(row.booking.id)}>
+    {rows === null && <p role="status" className="muted">Đang tải lịch đặt…</p>}
+    <div className="rows">{rows?.map(row => <button key={row.booking.id} aria-pressed={selected === row.booking.id}
+      onClick={() => staff ? setSelected(row.booking.id) : openPayment(row.booking.id)}>
       <strong>#{row.booking.id} · {row.name}</strong><span>{time(row.booking.startAtUtc)}</span><Status value={row.booking.status} />
     </button>)}</div>{rows?.length === 0 && <p>Chưa có lịch đặt.</p>}
     <Pager page={page} setPage={setPage} more={rows?.length === 15} /></section>
-    {selected && <BookingDetail key={selected} id={selected} call={call} fail={fail} endpoint={staff ? '/management/bookings/' : '/bookings/'} canCancel={!staff} changed={() => setRevision(value => value + 1)} />}
+    {selected && <BookingDetail key={selected} id={selected} call={call} fail={fail} staff={staff}
+      changed={() => setRevision(value => value + 1)} />}
   </>;
 }
 
